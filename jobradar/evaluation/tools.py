@@ -20,7 +20,7 @@ That combination gives you scores you can actually trust.
 import re
 from datetime import datetime
 
-from ..cv_profile import CV
+from ..cv_loader import load_cv
 
 
 def _skills_match(a: str, b: str) -> bool:
@@ -33,7 +33,8 @@ def _skills_match(a: str, b: str) -> bool:
     if a == b:
         return True
     short, long_ = sorted((a, b), key=len)
-    return bool(re.search(rf"(?<![\w]){re.escape(short)}(?![\w])", long_))
+    # "s?" so a plural still counts: "rest api" matches "rest apis".
+    return bool(re.search(rf"(?<![\w]){re.escape(short.rstrip('s'))}s?(?![\w])", long_))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -45,7 +46,7 @@ def calculate_skill_overlap(required_skills: list) -> dict:
     Compares skills the model extracted from the posting against the CV.
     Deterministic: same input always gives the same output.
     """
-    cv_skills = set(s.lower() for s in CV["skills"])
+    cv_skills = set(s.lower() for s in load_cv()["skills"])
     required = [s.lower().strip() for s in required_skills]
 
     matched, missing = [], []
@@ -62,6 +63,26 @@ def calculate_skill_overlap(required_skills: list) -> dict:
     }
 
 
+def _parse_month(value):
+    """'2024-04' → datetime; 'present' / 'actual' → now; junk → None."""
+    if str(value).strip().lower() in ("present", "current", "now", "actual", "actualidad"):
+        return datetime.now()
+    try:
+        return datetime.strptime(str(value).strip()[:7], "%Y-%m")
+    except ValueError:
+        return None
+
+
+def total_experience_years() -> float:
+    """All roles added up — used in the system prompt to judge seniority."""
+    months = 0
+    for job in load_cv()["experience"]:
+        start, end = _parse_month(job.get("start")), _parse_month(job.get("end"))
+        if start and end:
+            months += (end.year - start.year) * 12 + (end.month - start.month)
+    return round(months / 12, 1)
+
+
 def get_experience_years(technology: str) -> dict:
     """
     Sums the real months the candidate used a technology, across all roles.
@@ -71,12 +92,14 @@ def get_experience_years(technology: str) -> dict:
     total_months = 0
     roles = []
 
-    for job in CV["experience"]:
+    for job in load_cv()["experience"]:
         if not any(_skills_match(tech, t) for t in job["technologies"]):
             continue
 
-        start = datetime.strptime(job["start"], "%Y-%m")
-        end = datetime.strptime(job["end"], "%Y-%m")
+        start = _parse_month(job["start"])
+        end = _parse_month(job["end"])
+        if start is None or end is None:
+            continue
         months = (end.year - start.year) * 12 + (end.month - start.month)
         total_months += months
         roles.append(f'{job["title"]} @ {job["company"]} ({months} months)')
@@ -92,7 +115,7 @@ def get_experience_years(technology: str) -> dict:
 def get_candidate_profile() -> dict:
     """Lets the model pull the full CV on demand instead of us always
     pasting it into the prompt — this keeps token usage lower."""
-    return CV
+    return load_cv()
 
 
 # ══════════════════════════════════════════════════════════════

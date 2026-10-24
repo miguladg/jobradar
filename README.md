@@ -22,13 +22,15 @@ Each step can also be run independently (see [Commands](#commands)).
 
 ```
 search_bot/
+├── cv/                         # Put your CV file here (git-ignored)
 ├── api_call.py                  # Standalone scraper (no package needed)
 └── jobradar/                    # Main CLI package
     ├── __init__.py
     ├── __main__.py              # Makes `python -m jobradar` work
     ├── cli.py                   # Entry point — all subcommands
     ├── config.py                # Every setting in one place
-    ├── cv_profile.py            # Your CV as structured data
+    ├── cv_loader.py             # Reads the newest CV file in cv/
+    ├── cv_profile.py            # Fallback CV when cv/ is empty
     ├── logging_setup.py         # Console + file logging
     ├── trace.py                 # Step-by-step progress output
     ├── scraper/
@@ -51,7 +53,8 @@ search_bot/
 |------|-------------|
 | `api_call.py` | Self-contained flat scraper — run directly without installing the package |
 | `config.py` | Single source of truth for every setting — edit this, never the internals |
-| `cv_profile.py` | Your skills, roles and dates as Python dicts — powers the evaluation tools |
+| `cv_loader.py` | Finds the newest CV in `cv/`, extracts a structured profile with OpenAI, caches it |
+| `cv_profile.py` | Hand-written fallback profile, used when `cv/` is empty |
 | `cli.py` | Parses CLI arguments and calls the right function for each subcommand |
 | `scraper/linkedin.py` | `LinkedInScraper` class — fetches search pages and detail pages with retries |
 | `db/connection.py` | `get_connection()` context manager — guarantees the connection closes on error |
@@ -262,7 +265,29 @@ Done
 
 ## Customising your CV
 
-Edit `jobradar/cv_profile.py`. The file is plain Python — no JSON, no YAML.
+### Option 1 — drop your CV file in `cv/` (recommended)
+
+Put your CV in the `cv/` folder as **PDF, Word (.docx), .txt or .md**. If there are several files, the **newest** one is used, so updating your CV just means saving the new version there.
+
+The first time, OpenAI reads the file and turns it into structured data (skills, roles with dates, languages, location). The result is cached in `cv/.cache/`, so this only happens again when the file changes.
+
+Check what was read before scoring jobs:
+
+```bash
+python -m jobradar cv            # show the profile
+python -m jobradar cv --refresh  # re-read the file, ignoring the cache
+```
+
+Everything in the evaluation comes from this profile: the skill-overlap and experience-years tools, and the scoring rules in the prompt (your location, languages and total years of experience).
+
+Notes:
+- `cv/` is in `.gitignore`, so your CV is never committed.
+- Scanned PDFs (images of text) can't be read — export a text-based PDF or use .docx.
+- Jobs scored before you changed your CV keep their old scores.
+
+### Option 2 — edit `jobradar/cv_profile.py`
+
+If `cv/` is empty, the hand-written profile in `jobradar/cv_profile.py` is used instead.
 
 ```python
 CV = {
@@ -272,17 +297,12 @@ CV = {
             "title": "Backend Developer",
             "company": "Acme Corp",
             "start": "2023-01",   # YYYY-MM
-            "end":   "2024-06",
+            "end":   "2024-06",   # or "present"
             "technologies": ["python", "aws", "postgresql"],
         },
     ],
 }
 ```
-
-Key points:
-- `skills` drives `calculate_skill_overlap` — keep it lowercase.
-- `experience[].technologies` drives `get_experience_years` — also lowercase.
-- `start` / `end` must be `"YYYY-MM"` — the tool does exact date arithmetic.
 
 ---
 

@@ -6,6 +6,7 @@ cli.py — one entry point with subcommands.
     python -m jobradar top             # best matches
     python -m jobradar stats           # what's in the database
     python -m jobradar run             # scrape + evaluate + top
+    python -m jobradar cv              # show what was read from your CV
 
 The old project needed two separate scripts with different settings.
 One entry point means one place to look.
@@ -16,7 +17,7 @@ import logging
 import sys
 from datetime import date
 
-from . import config, logging_setup, trace
+from . import config, cv_loader, logging_setup, trace
 from .trace import step, detail, warn, section
 from .db import connection, repository, schema
 from .scraper.linkedin import LinkedInScraper
@@ -82,6 +83,10 @@ def cmd_evaluate(args):
     section("EVALUATE")
     step("checking that the OpenAI key is present")
     config.validate_openai()
+
+    # Load the CV before the loop so a bad file fails once, up front.
+    cv_loader.load_cv()
+    step(f"scoring against CV: {cv_loader.source()}")
 
     # The window applies to evaluation too, not just scraping.
     # --all-ages turns it off; --days overrides the number.
@@ -187,6 +192,27 @@ def cmd_stats(args):
 """)
 
 
+# ── cv ─────────────────────────────────────────────────────────
+
+def cmd_cv(args):
+    """Shows what the evaluator will see, so you can check the extraction
+    before spending money scoring jobs against it."""
+    section("CV PROFILE")
+    cv = cv_loader.load_cv(refresh=args.refresh)
+    print(f"""
+  Source        {cv_loader.source()}
+  Name          {cv.get("name")}
+  Location      {cv.get("location")}  (open to: {", ".join(cv.get("open_to", [])) or "-"})
+  Target roles  {", ".join(cv.get("target_roles", [])) or "-"}
+  Languages     {", ".join(f"{k} {v}" for k, v in cv.get("languages", {}).items()) or "-"}
+  Skills ({len(cv.get("skills", []))})   {", ".join(cv.get("skills", []))}
+""")
+    for job in cv.get("experience", []):
+        print(f"  {job['start']} → {job['end']}  {job['title']} @ {job['company']}")
+        print(f"      {', '.join(job.get('technologies', []))}")
+    print()
+
+
 # ── run (full pipeline) ────────────────────────────────────────
 
 def cmd_run(args):
@@ -227,6 +253,11 @@ def build_parser():
         sp = sub.add_parser(name, help=help_text)
         add_common(sp)
         sp.set_defaults(func=func)
+
+    sp = sub.add_parser("cv", help="show the profile read from your CV file")
+    sp.add_argument("--refresh", action="store_true",
+                    help="re-read the CV file even if a cached profile exists")
+    sp.set_defaults(func=cmd_cv)
 
     return p
 
