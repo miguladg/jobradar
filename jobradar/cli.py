@@ -1,7 +1,7 @@
 """
 cli.py — one entry point with subcommands.
 
-    python -m jobradar scrape          # last 3 days → database
+    python -m jobradar scrape          # last DAYS_BACK days → database
     python -m jobradar evaluate        # score with OpenAI
     python -m jobradar top             # best matches
     python -m jobradar stats           # what's in the database
@@ -44,24 +44,36 @@ def cmd_scrape(args):
         step("starting the LinkedIn scraper")
         scraper = LinkedInScraper(days_back=days, known_urls=known)
         terms = [args.term] if args.term else config.SEARCH_TERMS
-        jobs = scraper.run(terms)
+        totals = {"found": 0, "inserted": 0, "updated": 0}
+
+        # Save after EACH term, so Ctrl+C or a crash halfway through
+        # keeps everything scraped up to that point.
+        for i, term in enumerate(terms):
+            if i:
+                scraper.pause(config.DELAY_BETWEEN_TERMS)
+            jobs = scraper.scrape_term(term)
+            totals["found"] += len(jobs)
+
+            if args.dry_run:
+                for j in jobs[:10]:
+                    log.info("  %s | %s @ %s (%s)",
+                             j.get("formatted_posted_date"), j.get("title"),
+                             j.get("company"), j.get("is_remote"))
+                continue
+
+            stats = repository.save_jobs(conn, jobs)
+            totals["inserted"] += stats["inserted"]
+            totals["updated"] += stats["updated"]
+
         scraper.log_summary()
 
-        if not jobs:
-            step(f"no new jobs found in the last {days} days")
-            return
-
         if args.dry_run:
-            step(f"--dry-run: {len(jobs)} jobs found, NOT saving")
-            for j in jobs[:10]:
-                log.info("  %s | %s @ %s (%s)",
-                         j.get("formatted_posted_date"), j.get("title"),
-                         j.get("company"), j.get("is_remote"))
-            return
-
-        stats = repository.save_jobs(conn, jobs)
-        step(f"scrape complete: {stats['inserted']} new, "
-             f"{stats['updated']} updated")
+            step(f"--dry-run: {totals['found']} jobs found, NOT saved")
+        elif not totals["found"]:
+            step(f"no new jobs found in the last {days} day(s)")
+        else:
+            step(f"scrape complete: {totals['inserted']} new, "
+                 f"{totals['updated']} updated")
 
 
 # ── evaluate ───────────────────────────────────────────────────
@@ -133,7 +145,7 @@ def cmd_top(args):
         schema.initialize(conn)
         days = None if args.all_ages else (args.days or config.DAYS_BACK)
         rows = repository.fetch_top_matches(
-            conn, limit=args.limit, min_score=args.min_score, days_back=days
+            conn, limit=args.limit or 10, min_score=args.min_score, days_back=days
         )
 
     if not rows:
@@ -168,7 +180,7 @@ def cmd_stats(args):
 
     print(f"""
   Total jobs stored     {s['total_jobs']}
-  Posted last {config.DAYS_BACK} days     {s['in_window']}
+  Posted last {config.DAYS_BACK} day(s)   {s['in_window']}
   Evaluated             {s['evaluated']}
   Good matches (70+)    {s['good_matches']}
   Last scrape           {s['last_scrape']}
@@ -214,10 +226,7 @@ def build_parser():
     ]:
         sp = sub.add_parser(name, help=help_text)
         add_common(sp)
-        if name == "top":
-            sp.set_defaults(func=func, limit=10)
-        else:
-            sp.set_defaults(func=func)
+        sp.set_defaults(func=func)
 
     return p
 
@@ -226,9 +235,6 @@ def main():
     args = build_parser().parse_args()
     trace.enabled = not args.quiet
     logging_setup.setup(level="WARNING" if args.quiet else config.LOG_LEVEL)
-
-    if args.command == "top" and args.limit is None:
-        args.limit = 10
 
     try:
         args.func(args)

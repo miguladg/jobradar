@@ -18,11 +18,12 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════
 
 # ── How far back to look ───────────────────────────────────────
-# This is your "last three days" requirement. Change ONE number here
-# and both the LinkedIn URL filter and the local date check follow it.
-DAYS_BACK = int(os.environ.get("DAYS_BACK", "3"))
+# Scrape and evaluate jobs posted in the last 24 hours only.
+# Change ONE number here and both the LinkedIn URL filter and the
+# local date check follow it automatically.
+DAYS_BACK = int(os.environ.get("DAYS_BACK", "1"))
 
-# LinkedIn expects seconds, not days: 3 days = 259,200 seconds.
+# LinkedIn expects seconds, not days: 1 day = 86,400 seconds.
 # Computed, not hardcoded — so DAYS_BACK stays the single source of truth.
 SECONDS_BACK = DAYS_BACK * 24 * 60 * 60
 

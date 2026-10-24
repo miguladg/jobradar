@@ -39,6 +39,7 @@ def setup(level: str = None, log_file: str = None):
         root.addHandler(file_handler)
 
     # These libraries log a lot at DEBUG level — quiet them down.
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # (Some openai versions log as "httpx2"/"httpcore2", which flooded the
+    # log file with every request header.)
+    for noisy in ("urllib3", "openai", "httpx", "httpx2", "httpcore", "httpcore2"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

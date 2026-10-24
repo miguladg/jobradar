@@ -8,6 +8,7 @@ import random
 import psycopg2
 from psycopg2.extras import execute_values
 from datetime import datetime, timezone
+from urllib.parse import quote, urlsplit, urlunsplit
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -17,23 +18,29 @@ headers = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# r259200 = 3 days | r86400 = 1 day
+# Same DAYS_BACK variable as the jobradar package, so both stay in sync.
+# LinkedIn wants seconds: 1 day = r86400, 3 days = r259200.
+DAYS_BACK = int(os.environ.get("DAYS_BACK", "1"))
 base_url = (
     "https://www.linkedin.com/jobs/search/"
-    "?f_TPR=r259200&f_WT=1%2C2&location=Colombia"
+    f"?f_TPR=r{DAYS_BACK * 86400}&f_WT=1%2C2&location=Colombia"
     "&origin=JOB_SEARCH_PAGE_JOB_FILTER&keywords="
 )
 
 search_terms = [
-    "Data%20Analyst",
-    "Data%20Engineer",
-    "Data%20Scientist",
+    "Data Analyst",
+    "Data Engineer",
+    "Data Scientist",
     "Analyst",
-    "Systems%20Integration%20Engineer",
+    "Systems Integration Engineer",
 ]
 
-seen_urls = set()
-results = []
+
+def normalize_url(url):
+    """Strip ?refId=...&trackingId=... — they change every request and
+    would otherwise defeat the ON CONFLICT (url) dedupe."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 # ==============================================================
@@ -204,74 +211,67 @@ def extract_job_details(url):
 
 
 # ==============================================================
-# OPEN DB CONNECTION ONCE
+# MAIN — saves after each keyword batch
 # ==============================================================
 
-try:
-    conn = psycopg2.connect(
-        host=os.environ.get("DB_HOST", "localhost"),
-        port=os.environ.get("DB_PORT", "5432"),
-        dbname=os.environ.get("DB_NAME", "linkedin_jobs"),
-        user=os.environ.get("DB_USER", "postgres"),
-        password=os.environ.get("DB_PASSWORD", "")
-    )
-    print("✅ Connected to PostgreSQL.\n")
-except psycopg2.OperationalError as e:
-    print(f"⚠️  Could not connect to PostgreSQL: {e}")
-    print("The script will still run and save to CSV only.\n")
-    conn = None
-
-
-# ==============================================================
-# MAIN LOOP — saves after each keyword batch
-# ==============================================================
-
-for term in search_terms:
-    search_url = base_url + term
-    clean_term = term.replace("%20", " ")
-    print(f"\n🔍 Searching: {clean_term}")
-
+def main():
     try:
-        response = requests.get(search_url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-    except Exception as e:
-        print(f"  ⚠️  Failed to load search page: {e}")
-        continue
+        conn = psycopg2.connect(
+            host=os.environ.get("DB_HOST", "localhost"),
+            port=os.environ.get("DB_PORT", "5432"),
+            dbname=os.environ.get("DB_NAME", "linkedin_jobs"),
+            user=os.environ.get("DB_USER", "postgres"),
+            password=os.environ.get("DB_PASSWORD", "")
+        )
+        print("✅ Connected to PostgreSQL.\n")
+    except psycopg2.OperationalError as e:
+        print(f"⚠️  Could not connect to PostgreSQL: {e}")
+        print("Continuing without saving (results are only printed).\n")
+        conn = None
 
-    links = soup.find_all("a", class_="base-card__full-link")
-    job_urls = [
-        link.get("href") for link in links
-        if link.get("href") and link.get("href") not in seen_urls
-    ]
+    seen_urls = set()
+    try:
+        for term in search_terms:
+            print(f"\n🔍 Searching: {term}")
 
-    print(f"  Found {len(job_urls)} new job links")
+            try:
+                response = requests.get(base_url + quote(term), headers=headers, timeout=10)
+                soup = BeautifulSoup(response.text, "html.parser")
+            except Exception as e:
+                print(f"  ⚠️  Failed to load search page: {e}")
+                continue
 
-    batch = []  # ← one batch per keyword
+            job_urls = []
+            for link in soup.find_all("a", class_="base-card__full-link"):
+                href = link.get("href")
+                if href and normalize_url(href) not in seen_urls:
+                    seen_urls.add(normalize_url(href))
+                    job_urls.append(normalize_url(href))
 
-    for url in job_urls:
-        seen_urls.add(url)
-        job_data = extract_job_details(url)
+            print(f"  Found {len(job_urls)} new job links")
 
-        if job_data:
-            job_data["search_term"] = clean_term
-            batch.append(job_data)
-            results.append(job_data)
-            print(f"  ✅ {job_data['title']} @ {job_data['company']} | {job_data['date_posted']}")
+            batch = []  # ← one batch per keyword
+            for url in job_urls:
+                job_data = extract_job_details(url)
+                if job_data:
+                    job_data["search_term"] = term
+                    batch.append(job_data)
+                    print(f"  ✅ {job_data['title']} @ {job_data['company']} | {job_data['date_posted']}")
 
-        # Random pause to avoid getting blocked
-        time.sleep(random.uniform(2, 5))
+                # Random pause to avoid getting blocked
+                time.sleep(random.uniform(2, 5))
 
-    # ── Save this keyword's batch to PostgreSQL immediately ────
-    if conn:
-        guardar_en_postgres(conn, batch)
+            # ── Save this keyword's batch to PostgreSQL immediately ────
+            if conn:
+                guardar_en_postgres(conn, batch)
 
-    time.sleep(random.uniform(3, 6))
+            time.sleep(random.uniform(3, 6))
+    finally:
+        # Runs even on Ctrl+C or a crash, so the connection never leaks.
+        if conn:
+            conn.close()
+            print("\n✅ PostgreSQL connection closed.")
 
 
-# ==============================================================
-# CLOSE DB CONNECTION
-# ==============================================================
-
-if conn:
-    conn.close()
-    print("\n✅ PostgreSQL connection closed.")
+if __name__ == "__main__":
+    main()

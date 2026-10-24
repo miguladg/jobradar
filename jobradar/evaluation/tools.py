@@ -17,9 +17,23 @@ at reading and judging. So we split the work:
 That combination gives you scores you can actually trust.
 """
 
+import re
 from datetime import datetime
 
 from ..cv_profile import CV
+
+
+def _skills_match(a: str, b: str) -> bool:
+    """
+    True when one skill appears in the other as a WHOLE word:
+    "python 3" ↔ "python" and "node" ↔ "node.js" match, but "sql" does not
+    match "nosql" and "r" does not match "rest api" (plain substring
+    matching got both of those wrong and inflated scores).
+    """
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    return bool(re.search(rf"(?<![\w]){re.escape(short)}(?![\w])", long_))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -36,9 +50,7 @@ def calculate_skill_overlap(required_skills: list) -> dict:
 
     matched, missing = [], []
     for skill in required:
-        # substring match both ways: "python 3" matches "python",
-        # and "sql" matches "postgresql"
-        hit = any(skill in cv or cv in skill for cv in cv_skills)
+        hit = any(_skills_match(skill, cv) for cv in cv_skills)
         (matched if hit else missing).append(skill)
 
     total = len(required) or 1
@@ -60,7 +72,7 @@ def get_experience_years(technology: str) -> dict:
     roles = []
 
     for job in CV["experience"]:
-        if not any(tech in t or t in tech for t in job["technologies"]):
+        if not any(_skills_match(tech, t) for t in job["technologies"]):
             continue
 
         start = datetime.strptime(job["start"], "%Y-%m")
