@@ -2,11 +2,13 @@ import os
 import requests
 from bs4 import BeautifulSoup
 import time
-import csv
+
 import re
 import random
 import psycopg2
 from psycopg2.extras import execute_values
+from datetime import datetime, timezone
+from urllib.parse import quote, urlsplit, urlunsplit
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -16,124 +18,76 @@ headers = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# ✅ CAMBIO CLAVE: r86400 = 24h (3 días = r259200)
+# Same DAYS_BACK variable as the jobradar package, so both stay in sync.
+# LinkedIn wants seconds: 1 day = r86400, 3 days = r259200.
+DAYS_BACK = int(os.environ.get("DAYS_BACK", "1"))
 base_url = (
     "https://www.linkedin.com/jobs/search/"
-    "?f_TPR=r259200&f_WT=1%2C2&location=Colombia"
+    f"?f_TPR=r{DAYS_BACK * 86400}&f_WT=1%2C2&location=Colombia"
     "&origin=JOB_SEARCH_PAGE_JOB_FILTER&keywords="
 )
 
 search_terms = [
-    "Data%20Analyst",
-    "Data%20Engineer",
-    "Data%20Scientist",
+    "Data Analyst",
+    "Data Engineer",
+    "Data Scientist",
     "Analyst",
-    "Systems%20Integration%20Engineer",
+    "Systems Integration Engineer",
 ]
 
-seen_urls = set()
-results = []
+
+def normalize_url(url):
+    """Strip ?refId=...&trackingId=... — they change every request and
+    would otherwise defeat the ON CONFLICT (url) dedupe."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
-# ============================================================
-# POSTGRESQL SECTION
-# ============================================================
-# STUDENT NOTE:
-# We NEVER hardcode DB credentials in the script (same rule that
-# applies to API keys). Instead, we read them from environment
-# variables. Before running this script, set these in your terminal:
-#
-#   export DB_HOST=localhost
-#   export DB_PORT=5432
-#   export DB_NAME=linkedin_jobs
-#   export DB_USER=postgres
-#   export DB_PASSWORD=your_password
-#
-# Or put them in a .env file and load it with python-dotenv.
-# ============================================================
-
-def get_db_connection():
-    """
-    Opens a connection to PostgreSQL using environment variables.
-    STUDENT NOTE: a 'connection' is like opening a phone line to the
-    database. You open it, do your queries, then close it.
-    """
-    return psycopg2.connect(
-        host=os.environ.get("DB_HOST", "localhost"),
-        port=os.environ.get("DB_PORT", "5432"),
-        dbname=os.environ.get("DB_NAME", "linkedin_jobs"),
-        user=os.environ.get("DB_USER", "postgres"),
-        password=os.environ.get("DB_PASSWORD", "")
-    )
-
-
-def crear_tabla_si_no_existe(conn):
-    """
-    Creates the jobs table if it doesn't exist yet.
-    STUDENT NOTE: 'IF NOT EXISTS' makes this safe to run every time
-    the script starts — it won't error out or wipe existing data.
-
-    'url' is UNIQUE because it's the natural identifier for a job
-    posting: if we scrape the same job twice, we don't want two rows.
-    """
-    create_sql = """
-    CREATE TABLE IF NOT EXISTS jobs (
-        id SERIAL PRIMARY KEY,
-        search_term      TEXT,
-        title            TEXT,
-        company          TEXT,
-        location         TEXT,
-        seniority_level  TEXT,
-        employment_type  TEXT,
-        job_function     TEXT,
-        industries       TEXT,
-        salary           TEXT,
-        is_remote        TEXT,
-        date_posted      TEXT,
-        url              TEXT UNIQUE NOT NULL,
-        description      TEXT,
-        scraped_at       TIMESTAMP DEFAULT NOW()
-    );
-    """
-    with conn.cursor() as cur:
-        cur.execute(create_sql)
-    conn.commit()
-    print("✅ Table 'jobs' is ready.")
-
+# ==============================================================
+# DATABASE FUNCTION
+# ==============================================================
 
 def guardar_en_postgres(conn, jobs):
     """
-    Inserts all scraped jobs in a single batch (fast) and skips
-    duplicates automatically.
-
-    STUDENT NOTE: 'ON CONFLICT (url) DO NOTHING' means: if a row
-    with this url already exists (from a previous scrape run),
-    PostgreSQL just skips it instead of raising an error. This is
-    how we avoid duplicate job postings piling up every time you
-    re-run the scraper.
-
-    'execute_values' sends all rows in one network round-trip
-    instead of one INSERT per row — much faster for hundreds of jobs.
+    Inserts a batch of jobs in a single round-trip and skips
+    duplicates automatically via ON CONFLICT (url) DO NOTHING.
     """
     if not jobs:
-        print("No jobs to save.")
+        print("  ⚠️  No jobs to save in this batch.")
         return
 
     insert_sql = """
     INSERT INTO jobs (
-        search_term, title, company, location, seniority_level,
-        employment_type, job_function, industries, salary,
-        is_remote, date_posted, url, description
+        search_term, title, company, location, seniority_level, employment_type,
+        job_function, industries, salary, is_remote, date_posted, url, description,
+        scraped_from, jobs_company_url, applicant_link, number_applicants,
+        scraped_at, updated_at, formatted_posted_date
     ) VALUES %s
     ON CONFLICT (url) DO NOTHING;
     """
 
     rows = [
         (
-            job["search_term"], job["title"], job["company"], job["location"],
-            job["seniority_level"], job["employment_type"], job["job_function"],
-            job["industries"], job["salary"], job["is_remote"],
-            job["date_posted"], job["url"], job["description"]
+            job.get("search_term"),
+            job.get("title"),
+            job.get("company"),
+            job.get("location"),
+            job.get("seniority_level"),
+            job.get("employment_type"),
+            job.get("job_function"),
+            job.get("industries"),
+            job.get("salary"),
+            job.get("is_remote"),
+            job.get("date_posted"),
+            job.get("url"),
+            job.get("description"),
+            job.get("scraped_from"),
+            job.get("jobs_company_url"),
+            job.get("applicant_link"),
+            job.get("number_applicants"),
+            job.get("scraped_at"),
+            job.get("updated_at"),
+            job.get("formatted_posted_date"),
         )
         for job in jobs
     ]
@@ -141,26 +95,37 @@ def guardar_en_postgres(conn, jobs):
     with conn.cursor() as cur:
         execute_values(cur, insert_sql, rows)
     conn.commit()
-    print(f"✅ Attempted to save {len(rows)} jobs to PostgreSQL (duplicates by URL were skipped).")
+    print(f"  💾 Saved batch of {len(rows)} jobs (duplicates by URL were skipped).")
 
 
-# ============================================================
-# SCRAPING SECTION (unchanged from your original script)
-# ============================================================
+# ==============================================================
+# SCRAPING FUNCTIONS
+# ==============================================================
+
+def parse_number_applicants(text):
+    """
+    Extracts an integer from strings like '47 applicants' or '200+ applicants'.
+    Returns None if it can't parse.
+    """
+    if not text or text == "N/A":
+        return None
+    match = re.search(r"\d+", text.replace(",", ""))
+    return int(match.group()) if match else None
+
 
 def extract_job_details(url):
     try:
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # ── Título ─────────────────────────────────────────────
+        # ── Title ──────────────────────────────────────────────
         title = (
             soup.find("h1", class_=re.compile(r"top-card-layout__title"))
             or soup.find("h1", class_=re.compile(r"t-24"))
         )
         title_text = title.get_text(strip=True) if title else "N/A"
 
-        # ── Empresa ────────────────────────────────────────────
+        # ── Company ────────────────────────────────────────────
         company = (
             soup.find("a", class_=re.compile(r"topcard__org-name-link"))
             or soup.find("a", class_=re.compile(r"company-name"))
@@ -168,15 +133,15 @@ def extract_job_details(url):
         )
         company_text = company.get_text(strip=True) if company else "N/A"
 
-        # ── Ubicación ──────────────────────────────────────────
+        # ── Location ───────────────────────────────────────────
         location = soup.find("span", class_=re.compile(r"topcard__flavor--bullet"))
         location_text = location.get_text(strip=True) if location else "N/A"
 
-        # ── Fecha de publicación ───────────────────────────────
+        # ── Date posted (raw text) ─────────────────────────────
         date_posted = soup.find("span", class_=re.compile(r"posted-time-ago"))
         date_text = date_posted.get_text(strip=True) if date_posted else "N/A"
 
-        # ── Criterios (nivel, tipo contrato, etc.) ─────────────
+        # ── Criteria (seniority, contract type, etc.) ──────────
         criteria_items = soup.find_all("li", class_=re.compile(r"description__job-criteria-item"))
         seniority = employment_type = job_function = industries = "N/A"
 
@@ -196,33 +161,48 @@ def extract_job_details(url):
             elif "industr" in key:
                 industries = val
 
-        # ── Salario ────────────────────────────────────────────
+        # ── Salary ─────────────────────────────────────────────
         salary_el = soup.find("span", class_=re.compile(r"salary|compensation", re.I))
         salary_text = salary_el.get_text(strip=True) if salary_el else "N/A"
 
-        # ── Descripción completa ───────────────────────────────
+        # ── Number of applicants (integer) ─────────────────────
+        applicants_el = soup.find("span", class_=re.compile(r"num-applicants|applicant-count", re.I))
+        applicants_raw = applicants_el.get_text(strip=True) if applicants_el else None
+        number_applicants = parse_number_applicants(applicants_raw)
+
+        # ── Full description ───────────────────────────────────
         description = soup.find("div", class_=re.compile(r"show-more-less-html__markup"))
         description_text = description.get_text(strip=True) if description else "N/A"
 
-        # ── Detectar si es REMOTO ──────────────────────────────
+        # ── Detect REMOTE ──────────────────────────────────────
         remote_keywords = ["remote", "remoto", "100% remoto", "home office",
                            "work from home", "híbrido", "hybrid"]
         full_text = (description_text + " " + location_text).lower()
         is_remote = "Sí" if any(kw in full_text for kw in remote_keywords) else "No"
 
+        # ── Timestamps ─────────────────────────────────────────
+        now = datetime.now(timezone.utc)
+
         return {
-            "title":           title_text,
-            "company":         company_text,
-            "location":        location_text,
-            "seniority_level": seniority,
-            "employment_type": employment_type,
-            "job_function":    job_function,
-            "industries":      industries,
-            "salary":          salary_text,
-            "is_remote":       is_remote,
-            "date_posted":     date_text,
-            "url":             url,
-            "description":     description_text,
+            "title":                 title_text,
+            "company":               company_text,
+            "location":              location_text,
+            "seniority_level":       seniority,
+            "employment_type":       employment_type,
+            "job_function":          job_function,
+            "industries":            industries,
+            "salary":                salary_text,
+            "is_remote":             is_remote,
+            "date_posted":           date_text,
+            "url":                   url,
+            "description":           description_text,
+            "scraped_from":          None,
+            "jobs_company_url":      None,
+            "applicant_link":        None,
+            "number_applicants":     number_applicants,
+            "scraped_at":            now,
+            "updated_at":            now,
+            "formatted_posted_date": None,
         }
 
     except Exception as e:
@@ -230,63 +210,68 @@ def extract_job_details(url):
         return None
 
 
-# ── MAIN LOOP ─────────────────────────────────────────────────
-for term in search_terms:
-    search_url = base_url + term
-    clean_term = term.replace("%20", " ")
-    print(f"\n🔍 Searching: {clean_term}")
+# ==============================================================
+# MAIN — saves after each keyword batch
+# ==============================================================
 
+def main():
     try:
-        response = requests.get(search_url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-    except Exception as e:
-        print(f"  ⚠️  Failed to load search page: {e}")
-        continue
+        conn = psycopg2.connect(
+            host=os.environ.get("DB_HOST", "localhost"),
+            port=os.environ.get("DB_PORT", "5432"),
+            dbname=os.environ.get("DB_NAME", "linkedin_jobs"),
+            user=os.environ.get("DB_USER", "postgres"),
+            password=os.environ.get("DB_PASSWORD", "")
+        )
+        print("✅ Connected to PostgreSQL.\n")
+    except psycopg2.OperationalError as e:
+        print(f"⚠️  Could not connect to PostgreSQL: {e}")
+        print("Continuing without saving (results are only printed).\n")
+        conn = None
 
-    links = soup.find_all("a", class_="base-card__full-link")
-    job_urls = [
-        link.get("href") for link in links
-        if link.get("href") and link.get("href") not in seen_urls
-    ]
+    seen_urls = set()
+    try:
+        for term in search_terms:
+            print(f"\n🔍 Searching: {term}")
 
-    print(f"  Found {len(job_urls)} new job links")
+            try:
+                response = requests.get(base_url + quote(term), headers=headers, timeout=10)
+                soup = BeautifulSoup(response.text, "html.parser")
+            except Exception as e:
+                print(f"  ⚠️  Failed to load search page: {e}")
+                continue
 
-    for url in job_urls:
-        seen_urls.add(url)
-        job_data = extract_job_details(url)
+            job_urls = []
+            for link in soup.find_all("a", class_="base-card__full-link"):
+                href = link.get("href")
+                if href and normalize_url(href) not in seen_urls:
+                    seen_urls.add(normalize_url(href))
+                    job_urls.append(normalize_url(href))
 
-        if job_data:
-            job_data["search_term"] = clean_term
-            results.append(job_data)
-            print(f"  ✅ {job_data['title']} @ {job_data['company']} | {job_data['date_posted']}")
+            print(f"  Found {len(job_urls)} new job links")
 
-        # ✅ Pausa aleatoria para evitar bloqueos
-        time.sleep(random.uniform(2, 5))
+            batch = []  # ← one batch per keyword
+            for url in job_urls:
+                job_data = extract_job_details(url)
+                if job_data:
+                    job_data["search_term"] = term
+                    batch.append(job_data)
+                    print(f"  ✅ {job_data['title']} @ {job_data['company']} | {job_data['date_posted']}")
 
-    time.sleep(random.uniform(3, 6))
+                # Random pause to avoid getting blocked
+                time.sleep(random.uniform(2, 5))
+
+            # ── Save this keyword's batch to PostgreSQL immediately ────
+            if conn:
+                guardar_en_postgres(conn, batch)
+
+            time.sleep(random.uniform(3, 6))
+    finally:
+        # Runs even on Ctrl+C or a crash, so the connection never leaks.
+        if conn:
+            conn.close()
+            print("\n✅ PostgreSQL connection closed.")
 
 
-# ── GUARDAR CSV (se mantiene como respaldo) ────────────────────
-fieldnames = [
-    "search_term", "title", "company", "location",
-    "seniority_level", "employment_type", "job_function",
-    "industries", "salary", "is_remote", "date_posted",
-    "url", "description"
-]
-
-with open("linkedin_jobs.csv", "w", newline="", encoding="utf-8") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(results)
-
-print(f"\n✅ Saved {len(results)} jobs to linkedin_jobs.csv")
-
-# ── GUARDAR EN POSTGRESQL ───────────────────────────────────────
-try:
-    conn = get_db_connection()
-    crear_tabla_si_no_existe(conn)
-    guardar_en_postgres(conn, results)
-    conn.close()
-except psycopg2.OperationalError as e:
-    print(f"⚠️  Could not connect to PostgreSQL: {e}")
-    print("Your CSV file was still saved successfully above.")
+if __name__ == "__main__":
+    main()
