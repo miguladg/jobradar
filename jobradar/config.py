@@ -89,6 +89,9 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 # Folder for your CV file (PDF, DOCX, TXT or MD). The newest file is used;
 # if the folder is empty, cv_profile.py is used instead.
 CV_DIR = os.environ.get("CV_DIR", "cv")
+# Reading the CV happens once per file (then it's cached), so a stronger
+# model is worth it here: a missed skill lowers every job's score.
+CV_EXTRACT_MODEL = os.environ.get("CV_EXTRACT_MODEL", "gpt-4o")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 MAX_TOOL_TURNS = 6
 

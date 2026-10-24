@@ -33,7 +33,8 @@ def _skills_match(a: str, b: str) -> bool:
     if a == b:
         return True
     short, long_ = sorted((a, b), key=len)
-    return bool(re.search(rf"(?<![\w]){re.escape(short)}(?![\w])", long_))
+    # "s?" so a plural still counts: "rest api" matches "rest apis".
+    return bool(re.search(rf"(?<![\w]){re.escape(short.rstrip('s'))}s?(?![\w])", long_))
 
 
 # ══════════════════════════════════════════════════════════════

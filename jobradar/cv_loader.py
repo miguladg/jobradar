@@ -115,9 +115,20 @@ _PROFILE_SCHEMA = {
 }
 
 _EXTRACT_PROMPT = """You convert a CV into structured data. Copy facts exactly
-from the CV; never invent skills, dates or roles. Write every skill and
-technology in lowercase. Dates are YYYY-MM; if only a year is given use
-YYYY-01 for a start and YYYY-12 for an end. Use 'present' for an ongoing role.
+from the CV; never invent skills, dates or roles.
+
+Be EXHAUSTIVE with skills and technologies: include every language, library,
+framework, cloud service, database, tool, platform and methodology mentioned
+ANYWHERE — the skills section, the summary, and inside each job's bullet
+points (e.g. pandas, etl, aws lambda, notion, mercadolibre, qa testing).
+A downstream tool scores job matches from this list, so a missed skill
+unfairly lowers the candidate's score. Write them in lowercase.
+
+For open_to, capture any stated work arrangement (remote, hybrid, on-site,
+relocation). Keep language levels as written (e.g. "B2", "Professional").
+
+Dates are YYYY-MM; if only a year is given use YYYY-01 for a start and
+YYYY-12 for an end. Use 'present' for an ongoing role.
 Call save_profile exactly once."""
 
 
@@ -129,7 +140,7 @@ def extract_profile(text):
     client = OpenAI(api_key=config.OPENAI_API_KEY)
 
     response = client.chat.completions.create(
-        model=config.OPENAI_MODEL,
+        model=config.CV_EXTRACT_MODEL,
         temperature=0,
         messages=[{"role": "system", "content": _EXTRACT_PROMPT},
                   {"role": "user", "content": text[:20000]}],
@@ -185,7 +196,7 @@ def load_cv(refresh=False):
                 f"Could only read {len(text)} characters from {path.name}.\n"
                 "If it is a scanned PDF (an image), export it as text-based "
                 "PDF or save it as .docx/.txt instead.")
-        detail(f"{len(text)} characters read; asking {config.OPENAI_MODEL} to structure it")
+        detail(f"{len(text)} characters read; asking {config.CV_EXTRACT_MODEL} to structure it")
         _cv = extract_profile(text)
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(_cv, ensure_ascii=False, indent=2), encoding="utf-8")
