@@ -19,7 +19,8 @@ import logging
 from openai import OpenAI
 
 from .. import config
-from .tools import TOOL_SCHEMAS, TOOL_IMPLEMENTATIONS
+from ..cv_loader import load_cv
+from .tools import TOOL_SCHEMAS, TOOL_IMPLEMENTATIONS, total_experience_years
 from ..trace import step, detail, warn
 
 log = logging.getLogger(__name__)
@@ -38,8 +39,24 @@ def get_client():
     return _client
 
 
-SYSTEM_PROMPT = """You are a strict, honest career advisor evaluating whether a
+def build_system_prompt() -> str:
+    """
+    Built from the CURRENT CV, so a new CV file changes the rules too
+    (location, languages, seniority) — nothing about you is hardcoded here.
+    """
+    cv = load_cv()
+    languages = ", ".join(f"{k} ({v})" for k, v in cv.get("languages", {}).items()) or "not stated"
+    open_to = ", ".join(cv.get("open_to", [])) or "not stated"
+    roles = ", ".join(cv.get("target_roles", [])) or "not stated"
+
+    return f"""You are a strict, honest career advisor evaluating whether a
 job posting fits a specific candidate.
+
+Candidate snapshot:
+- Target roles: {roles}
+- Total professional experience: {total_experience_years()} years
+- Based in: {cv.get("location", "not stated")}; open to: {open_to}
+- Languages: {languages}
 
 Your process:
 1. Read the posting and extract the skills it genuinely requires.
@@ -52,9 +69,10 @@ Your process:
 Scoring rules — an inflated score wastes the candidate's time:
 - Penalize heavily when a required core technology is entirely absent
   from the candidate's history.
-- Penalize seniority mismatch (Senior/Lead roles for a mid-level candidate).
-- The candidate's English is B2: flag native/C1 requirements as a concern.
-- The candidate is in Bogotá, Colombia: flag on-site roles elsewhere.
+- Penalize seniority mismatch: compare the role's level and required years
+  with the candidate's total experience above.
+- Flag language requirements above the candidate's stated levels as a concern.
+- Flag on-site roles outside the candidate's location as a concern.
 - Below 50 = "skip". Only 80+ deserves "apply_now"."""
 
 
@@ -82,7 +100,7 @@ def evaluate_job(job: dict, verbose: bool = True) -> dict:
     """Run the full tool-calling loop for ONE job."""
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": build_system_prompt()},
         {"role": "user", "content": build_job_text(job)},
     ]
 

@@ -86,6 +86,9 @@ USER_AGENT = (
 # ═══════════════════════════════════════════════════════════════
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# Folder for your CV file (PDF, DOCX, TXT or MD). The newest file is used;
+# if the folder is empty, cv_profile.py is used instead.
+CV_DIR = os.environ.get("CV_DIR", "cv")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 MAX_TOOL_TURNS = 6
 
